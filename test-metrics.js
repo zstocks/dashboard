@@ -10,8 +10,8 @@ const { getSystemMetrics, formatBytes } = require('./src/metrics');
 console.log('Taking first CPU reading...');
 console.log('Waiting 1 second for delta...\n');
 
-setTimeout(() => {
-  const metrics = getSystemMetrics();
+setTimeout(async () => {
+  const metrics = await getSystemMetrics();
 
   // --- CPU ---
   console.log('=== CPU ===');
@@ -59,6 +59,18 @@ setTimeout(() => {
   // --- Uptime ---
   console.log('\n=== Uptime ===');
   console.log(`  ${metrics.uptime.formatted} (${metrics.uptime.totalSeconds}s)`);
+
+  // --- Docker Containers ---
+  console.log('\n=== Docker Containers ===');
+  if (Array.isArray(metrics.containers)) {
+    metrics.containers.forEach((c) => {
+      const mem = c.stats?.memory ? `${formatBytes(c.stats.memory.usageBytes)}` : 'N/A';
+      const cpu = c.stats?.cpuPercent != null ? `${c.stats.cpuPercent}%` : 'N/A';
+      console.log(`  ${c.name} [${c.state}] — CPU: ${cpu}, Mem: ${mem}, Restarts: ${c.restartCount}`);
+    });
+  } else {
+    console.log(`  ${metrics.containers.error || 'No Docker data'}`);
+  }
 
   // --- Raw JSON ---
   console.log('\n=== Full JSON snapshot ===');
