@@ -1,13 +1,12 @@
 // metrics/index.js — Aggregate all system metrics into a single snapshot
 //
-// This module provides two things:
-// 1. getSystemMetrics() — returns a full snapshot of all system metrics
-// 2. getDockerMetrics re-exported for standalone use
+// Collects:
+// - System metrics from /proc (CPU, memory, disk, load, uptime) — synchronous
+// - Docker container metrics via Unix socket — async
+// - Nginx connection/request metrics via stub_status — async
 //
-// Note: getSystemMetrics() is now async because Docker metrics
-// require HTTP requests over the Unix socket. The system metrics
-// (CPU, memory, disk, etc.) are still synchronous reads from /proc,
-// but we await the Docker call and include both in one snapshot.
+// getSystemMetrics() is async because Docker and Nginx collectors
+// make HTTP requests. If either is unreachable, the rest still works.
 
 const { getCpuUsage, getCpuInfo } = require('./cpu');
 const { getMemoryUsage, formatBytes } = require('./memory');
@@ -15,6 +14,7 @@ const { getDiskUsage } = require('./disk');
 const { getLoadAverage } = require('./loadavg');
 const { getUptime } = require('./uptime');
 const { getDockerMetrics } = require('./docker');
+const { getNginxMetrics } = require('./nginx');
 
 // Take the initial CPU reading immediately on import.
 // The first call to getCpuUsage() stores the baseline;
@@ -34,14 +34,20 @@ async function getSystemMetrics() {
   };
 
   // Docker metrics — async, requires socket communication
-  // If Docker is unreachable, we still return system metrics
   try {
     system.containers = await getDockerMetrics();
   } catch (err) {
     system.containers = { error: err.message };
   }
 
+  // Nginx metrics — async, requires HTTP request to stub_status
+  try {
+    system.nginx = await getNginxMetrics();
+  } catch (err) {
+    system.nginx = { error: err.message };
+  }
+
   return system;
 }
 
-module.exports = { getSystemMetrics, getDockerMetrics, formatBytes };
+module.exports = { getSystemMetrics, getDockerMetrics, getNginxMetrics, formatBytes };

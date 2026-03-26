@@ -72,6 +72,21 @@ setTimeout(async () => {
     console.log(`  ${metrics.containers.error || 'No Docker data'}`);
   }
 
+  // --- Nginx ---
+  console.log('\n=== Nginx ===');
+  if (metrics.nginx && !metrics.nginx.error) {
+    console.log(`  Active connections: ${metrics.nginx.activeConnections}`);
+    console.log(`  Total requests:    ${metrics.nginx.requests}`);
+    console.log(`  Reading: ${metrics.nginx.reading}  Writing: ${metrics.nginx.writing}  Waiting: ${metrics.nginx.waiting}`);
+    if (metrics.nginx.rates) {
+      console.log(`  Requests/sec:      ${metrics.nginx.rates.requestsPerSecond}`);
+    } else {
+      console.log(`  Rates:             (first reading, no delta yet)`);
+    }
+  } else {
+    console.log(`  ${metrics.nginx?.error || 'No Nginx data'}`);
+  }
+
   // --- Raw JSON ---
   console.log('\n=== Full JSON snapshot ===');
   console.log(JSON.stringify(metrics, null, 2));
