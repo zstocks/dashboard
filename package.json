@@ -5,5 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
   }
 }
