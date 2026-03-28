@@ -1,12 +1,13 @@
-// server.js — Dashboard API server with WebSocket support
+// server.js — Dashboard API server with WebSocket and static file serving
 //
 // HTTP endpoints serve JSON from the ring buffer (collected on interval).
 // WebSocket clients receive live pushes every collection cycle.
+// Static files (the dashboard UI) are served from the public/ directory.
 //
 // Routes:
-//   GET /               — basic info + status
+//   GET /               — serves public/index.html (the dashboard UI)
 //   GET /health         — health check
-//   GET /api/system     — latest system metrics (CPU, memory, disk, load, uptime)
+//   GET /api/system     — latest system metrics
 //   GET /api/containers — latest Docker container stats
 //   GET /api/nginx      — latest Nginx metrics
 //   GET /api/metrics    — latest full snapshot
@@ -14,10 +15,45 @@
 //   WS  /ws             — WebSocket stream (live updates)
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { WebSocketServer } = require('ws');
 const collector = require('./collector');
 
 const PORT = process.env.PORT || 3000;
+const PUBLIC_DIR = path.join(__dirname, 'public');
+
+// ---------------------------------------------------------------------------
+// Static file serving
+// ---------------------------------------------------------------------------
+// Maps file extensions to MIME types. When a request comes in that
+// isn't an API route, we check if it matches a file in public/.
+// ---------------------------------------------------------------------------
+const MIME_TYPES = {
+  '.html': 'text/html',
+  '.css': 'text/css',
+  '.js': 'application/javascript',
+  '.json': 'application/json',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+};
+
+function serveStaticFile(res, filePath) {
+  const ext = path.extname(filePath);
+  const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+
+  fs.readFile(filePath, (err, data) => {
+    if (err) {
+      return sendError(res, 'Not found', 404);
+    }
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': data.length,
+    });
+    res.end(data);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Response helpers
@@ -38,38 +74,11 @@ function sendError(res, message, statusCode = 500) {
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
-// API endpoints now read from the collector's ring buffer instead of
-// calling metric functions directly. This means:
-// - Responses are instant (no waiting for Docker/Nginx HTTP calls)
-// - All clients see the same data for the same collection cycle
-// - History is available for charts
-// ---------------------------------------------------------------------------
 const routes = {
-  'GET /': async (req, res) => {
-    sendJson(res, {
-      app: 'dashboard',
-      version: '1.0.0',
-      status: 'collecting',
-      interval: `${collector.COLLECT_INTERVAL / 1000}s`,
-      historySize: collector.getHistory().length,
-      wsClients: collector.getClientCount(),
-      endpoints: [
-        'GET /health',
-        'GET /api/system',
-        'GET /api/containers',
-        'GET /api/nginx',
-        'GET /api/metrics',
-        'GET /api/history',
-        'WS  /ws',
-      ],
-    });
-  },
-
   'GET /health': async (req, res) => {
     sendJson(res, { status: 'ok', app: 'dashboard' });
   },
 
-  // Individual metric endpoints — pull specific sections from the latest snapshot
   'GET /api/system': async (req, res) => {
     const latest = collector.getLatest();
     if (!latest) {
@@ -108,7 +117,6 @@ const routes = {
     });
   },
 
-  // Full snapshot — everything in one call
   'GET /api/metrics': async (req, res) => {
     const latest = collector.getLatest();
     if (!latest) {
@@ -117,7 +125,6 @@ const routes = {
     sendJson(res, latest);
   },
 
-  // Full history — for chart backfill on page load
   'GET /api/history': async (req, res) => {
     sendJson(res, {
       interval: collector.COLLECT_INTERVAL,
@@ -130,11 +137,11 @@ const routes = {
 // HTTP server
 // ---------------------------------------------------------------------------
 const server = http.createServer(async (req, res) => {
-  const path = req.url.split('?')[0].replace(/\/+$/, '') || '/';
-  const key = `${req.method} ${path}`;
+  const urlPath = req.url.split('?')[0].replace(/\/+$/, '') || '/';
+  const key = `${req.method} ${urlPath}`;
 
+  // Check API routes first
   const handler = routes[key];
-
   if (handler) {
     try {
       await handler(req, res);
@@ -142,20 +149,26 @@ const server = http.createServer(async (req, res) => {
       console.error(`Error handling ${key}:`, err);
       sendError(res, 'Internal server error');
     }
-  } else {
-    sendError(res, `Not found: ${req.method} ${path}`, 404);
+    return;
   }
+
+  // Fall through to static file serving
+  // Map "/" to "/index.html"
+  const fileName = urlPath === '/' ? '/index.html' : urlPath;
+  const filePath = path.join(PUBLIC_DIR, fileName);
+
+  // Security: make sure the resolved path is still within PUBLIC_DIR
+  // This prevents directory traversal attacks like "/../../../etc/passwd"
+  const resolved = path.resolve(filePath);
+  if (!resolved.startsWith(PUBLIC_DIR)) {
+    return sendError(res, 'Forbidden', 403);
+  }
+
+  serveStaticFile(res, resolved);
 });
 
 // ---------------------------------------------------------------------------
 // WebSocket server
-// ---------------------------------------------------------------------------
-// The WebSocket server shares the same HTTP server. When a client
-// connects to /ws, the HTTP upgrade handshake is handled by the ws
-// library, and from then on it's a persistent bidirectional connection.
-//
-// On connect, the client receives the full history. After that,
-// new snapshots are pushed automatically every collection cycle.
 // ---------------------------------------------------------------------------
 const wss = new WebSocketServer({ server, path: '/ws' });
 

@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Server Dashboard</title>
+
+  <!-- Chart.js for the history chart -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+  <style>
+    /* -----------------------------------------------------------------
+       CSS variables — change these to re-theme the whole dashboard.
+       Using a dark theme because it's a monitoring tool, and dark
+       backgrounds reduce eye strain during extended viewing.
+    ----------------------------------------------------------------- */
+    :root {
+      --bg-primary: #0f1117;
+      --bg-card: #1a1d27;
+      --bg-card-hover: #222632;
+      --border: #2a2e3a;
+      --text-primary: #e4e4e7;
+      --text-secondary: #9ca3af;
+      --text-dim: #6b7280;
+      --accent-blue: #3b82f6;
+      --accent-green: #22c55e;
+      --accent-yellow: #eab308;
+      --accent-red: #ef4444;
+      --accent-purple: #a855f7;
+      --accent-cyan: #06b6d4;
+    }
+
+    /* -----------------------------------------------------------------
+       Reset & base
+    ----------------------------------------------------------------- */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      line-height: 1.5;
+      padding: 24px;
+      min-height: 100vh;
+    }
+
+    /* -----------------------------------------------------------------
+       Layout
+    ----------------------------------------------------------------- */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .header h1 {
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    .header-meta {
+      text-align: right;
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .grid {
+      display: grid;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    .grid-2 { grid-template-columns: repeat(2, 1fr); }
+    .grid-1 { grid-template-columns: 1fr; }
+
+    @media (max-width: 768px) {
+      .grid-3, .grid-2 { grid-template-columns: 1fr; }
+      body { padding: 12px; }
+    }
+
+    /* -----------------------------------------------------------------
+       Cards
+    ----------------------------------------------------------------- */
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+    }
+
+    .card-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      margin-bottom: 12px;
+    }
+
+    /* -----------------------------------------------------------------
+       Gauge — SVG ring with a percentage in the center
+    ----------------------------------------------------------------- */
+    .gauge {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .gauge svg {
+      width: 120px;
+      height: 120px;
+      transform: rotate(-90deg);
+    }
+
+    .gauge-circle-bg {
+      fill: none;
+      stroke: var(--border);
+      stroke-width: 8;
+    }
+
+    .gauge-circle-fill {
+      fill: none;
+      stroke-width: 8;
+      stroke-linecap: round;
+      transition: stroke-dashoffset 0.8s ease, stroke 0.5s ease;
+    }
+
+    .gauge-value {
+      font-size: 28px;
+      font-weight: 700;
+      margin-top: -80px;
+      margin-bottom: 36px;
+    }
+
+    .gauge-label {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    /* -----------------------------------------------------------------
+       Stat rows (for load average, nginx, etc.)
+    ----------------------------------------------------------------- */
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .stat-row:last-child { border-bottom: none; }
+
+    .stat-label {
+      font-size: 13px;
+      color: var(--text-secondary);
+    }
+
+    .stat-value {
+      font-size: 14px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* -----------------------------------------------------------------
+       Container cards
+    ----------------------------------------------------------------- */
+    .container-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 12px;
+    }
+
+    .container-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      transition: background 0.2s;
+    }
+
+    .container-card:hover { background: var(--bg-card-hover); }
+
+    .container-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 12px;
+    }
+
+    .container-name {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .status-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .status-running {
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--accent-green);
+    }
+
+    .status-exited {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--accent-red);
+    }
+
+    .status-other {
+      background: rgba(234, 179, 8, 0.15);
+      color: var(--accent-yellow);
+    }
+
+    .container-stats {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .container-stat-label {
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+
+    .container-stat-value {
+      font-size: 13px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* -----------------------------------------------------------------
+       Chart container
+    ----------------------------------------------------------------- */
+    .chart-container {
+      position: relative;
+      height: 200px;
+    }
+
+    /* -----------------------------------------------------------------
+       Connection status indicator
+    ----------------------------------------------------------------- */
+    .connection-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+
+    .connection-dot.connected { background: var(--accent-green); }
+    .connection-dot.disconnected { background: var(--accent-red); }
+
+    /* -----------------------------------------------------------------
+       Section headings
+    ----------------------------------------------------------------- */
+    .section-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-secondary);
+      margin-bottom: 12px;
+      margin-top: 8px;
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- ----------------------------------------------------------------
+       Header
+  ----------------------------------------------------------------- -->
+  <div class="header">
+    <div>
+      <h1>Server Dashboard</h1>
+      <span id="cpu-model" style="font-size: 13px; color: var(--text-dim);"></span>
+    </div>
+    <div class="header-meta">
+      <div>
+        <span class="connection-dot disconnected" id="ws-dot"></span>
+        <span id="ws-status">Connecting...</span>
+      </div>
+      <div id="uptime"></div>
+      <div id="last-updated"></div>
+    </div>
+  </div>
+
+  <!-- ----------------------------------------------------------------
+       System gauges — CPU, Memory, Disk
+  ----------------------------------------------------------------- -->
+  <div class="grid grid-3">
+    <div class="card">
+      <div class="card-title">CPU Usage</div>
+      <div class="gauge">
+        <svg viewBox="0 0 120 120">
+          <circle class="gauge-circle-bg" cx="60" cy="60" r="50"/>
+          <circle class="gauge-circle-fill" id="cpu-gauge" cx="60" cy="60" r="50"
+                  stroke="var(--accent-blue)"
+                  stroke-dasharray="314.16"
+                  stroke-dashoffset="314.16"/>
+        </svg>
+        <div class="gauge-value" id="cpu-value">--%</div>
+        <div class="gauge-label" id="cpu-cores"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Memory</div>
+      <div class="gauge">
+        <svg viewBox="0 0 120 120">
+          <circle class="gauge-circle-bg" cx="60" cy="60" r="50"/>
+          <circle class="gauge-circle-fill" id="mem-gauge" cx="60" cy="60" r="50"
+                  stroke="var(--accent-purple)"
+                  stroke-dasharray="314.16"
+                  stroke-dashoffset="314.16"/>
+        </svg>
+        <div class="gauge-value" id="mem-value">--%</div>
+        <div class="gauge-label" id="mem-detail"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Disk</div>
+      <div class="gauge">
+        <svg viewBox="0 0 120 120">
+          <circle class="gauge-circle-bg" cx="60" cy="60" r="50"/>
+          <circle class="gauge-circle-fill" id="disk-gauge" cx="60" cy="60" r="50"
+                  stroke="var(--accent-cyan)"
+                  stroke-dasharray="314.16"
+                  stroke-dashoffset="314.16"/>
+        </svg>
+        <div class="gauge-value" id="disk-value">--%</div>
+        <div class="gauge-label" id="disk-detail"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ----------------------------------------------------------------
+       Load Average & Nginx Stats
+  ----------------------------------------------------------------- -->
+  <div class="grid grid-2">
+    <div class="card">
+      <div class="card-title">Load Average</div>
+      <div class="stat-row">
+        <span class="stat-label">1 minute</span>
+        <span class="stat-value" id="load-1">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">5 minutes</span>
+        <span class="stat-value" id="load-5">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">15 minutes</span>
+        <span class="stat-value" id="load-15">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Processes</span>
+        <span class="stat-value" id="load-procs">--</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Nginx</div>
+      <div class="stat-row">
+        <span class="stat-label">Active connections</span>
+        <span class="stat-value" id="nginx-active">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Requests/sec</span>
+        <span class="stat-value" id="nginx-rps">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Total requests</span>
+        <span class="stat-value" id="nginx-total">--</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Waiting (keep-alive)</span>
+        <span class="stat-value" id="nginx-waiting">--</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ----------------------------------------------------------------
+       History chart — CPU and Memory over time
+  ----------------------------------------------------------------- -->
+  <div class="grid grid-1">
+    <div class="card">
+      <div class="card-title">CPU & Memory History</div>
+      <div class="chart-container">
+        <canvas id="history-chart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- ----------------------------------------------------------------
+       Docker containers
+  ----------------------------------------------------------------- -->
+  <div class="section-title">Docker Containers</div>
+  <div class="container-grid" id="containers"></div>
+
+  <!-- ----------------------------------------------------------------
+       JavaScript — WebSocket connection and UI updates
+  ----------------------------------------------------------------- -->
+  <script>
+    // ===================================================================
+    // Helpers
+    // ===================================================================
+
+    // Format bytes into a human-readable string (e.g., "3.7 GB")
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(1024));
+      return (bytes / Math.pow(1024, i)).toFixed(1) + ' ' + units[i];
+    }
+
+    // Format seconds into a readable uptime string
+    function formatUptime(seconds) {
+      const d = Math.floor(seconds / 86400);
+      const h = Math.floor((seconds % 86400) / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      if (d > 0) return d + 'd ' + h + 'h ' + m + 'm';
+      return h + 'h ' + m + 'm';
+    }
+
+    // Format seconds into a shorter uptime for container cards
+    function formatContainerUptime(seconds) {
+      if (seconds === 0) return 'Stopped';
+      const d = Math.floor(seconds / 86400);
+      const h = Math.floor((seconds % 86400) / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      if (d > 0) return d + 'd ' + h + 'h';
+      if (h > 0) return h + 'h ' + m + 'm';
+      return m + 'm';
+    }
+
+    // Pick a color based on a percentage threshold
+    // Green under 60, yellow 60-85, red above 85
+    function thresholdColor(percent) {
+      if (percent < 60) return 'var(--accent-green)';
+      if (percent < 85) return 'var(--accent-yellow)';
+      return 'var(--accent-red)';
+    }
+
+    // Update a gauge's filled arc and color
+    // The circumference of our gauge circle (r=50) is 2 * PI * 50 = 314.16
+    // stroke-dashoffset controls how much of the circle is "unfilled"
+    function updateGauge(elementId, percent) {
+      const circumference = 314.16;
+      const offset = circumference - (percent / 100) * circumference;
+      const el = document.getElementById(elementId);
+      el.style.strokeDashoffset = offset;
+      el.style.stroke = thresholdColor(percent);
+    }
+
+    // ===================================================================
+    // Chart setup
+    // ===================================================================
+    // Chart.js line chart showing CPU and memory percentage over time.
+    // The x-axis shows timestamps, y-axis shows percentage (0-100).
+    // New data points are pushed in as WebSocket messages arrive.
+    // ===================================================================
+
+    const ctx = document.getElementById('history-chart').getContext('2d');
+
+    const historyChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [
+          {
+            label: 'CPU %',
+            data: [],
+            borderColor: '#3b82f6',
+            backgroundColor: 'rgba(59, 130, 246, 0.1)',
+            borderWidth: 1.5,
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+          },
+          {
+            label: 'Memory %',
+            data: [],
+            borderColor: '#a855f7',
+            backgroundColor: 'rgba(168, 85, 247, 0.1)',
+            borderWidth: 1.5,
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 300 },
+        interaction: { intersect: false, mode: 'index' },
+        scales: {
+          x: {
+            ticks: {
+              color: '#6b7280',
+              maxTicksLimit: 10,
+              font: { size: 11 },
+            },
+            grid: { color: 'rgba(42, 46, 58, 0.5)' },
+          },
+          y: {
+            min: 0,
+            max: 100,
+            ticks: {
+              color: '#6b7280',
+              callback: function(v) { return v + '%'; },
+              font: { size: 11 },
+            },
+            grid: { color: 'rgba(42, 46, 58, 0.5)' },
+          },
+        },
+        plugins: {
+          legend: {
+            labels: {
+              color: '#9ca3af',
+              usePointStyle: true,
+              pointStyle: 'circle',
+              font: { size: 12 },
+            },
+          },
+          tooltip: {
+            callbacks: {
+              label: function(ctx) {
+                return ctx.dataset.label + ': ' + ctx.parsed.y.toFixed(1) + '%';
+              },
+            },
+          },
+        },
+      },
+    });
+
+    // Maximum data points to show on the chart
+    const MAX_CHART_POINTS = 120;
+
+    // Add a data point to the chart
+    function addChartPoint(snapshot) {
+      const time = new Date(snapshot.timestamp).toLocaleTimeString();
+      const cpuPercent = snapshot.cpu ? snapshot.cpu.total : 0;
+      const memPercent = snapshot.memory ? snapshot.memory.ram.usagePercent : 0;
+
+      historyChart.data.labels.push(time);
+      historyChart.data.datasets[0].data.push(cpuPercent);
+      historyChart.data.datasets[1].data.push(memPercent);
+
+      // Trim to max points
+      while (historyChart.data.labels.length > MAX_CHART_POINTS) {
+        historyChart.data.labels.shift();
+        historyChart.data.datasets[0].data.shift();
+        historyChart.data.datasets[1].data.shift();
+      }
+
+      historyChart.update('none');
+    }
+
+    // ===================================================================
+    // UI update function
+    // ===================================================================
+    // Takes a metrics snapshot and updates every element on the page.
+    // Called each time we receive a new WebSocket message.
+    // ===================================================================
+
+    function updateDashboard(data) {
+      // --- CPU ---
+      if (data.cpu) {
+        const cpuPercent = data.cpu.total || 0;
+        document.getElementById('cpu-value').textContent = cpuPercent.toFixed(1) + '%';
+        updateGauge('cpu-gauge', cpuPercent);
+        document.getElementById('cpu-cores').textContent = data.cpu.coreCount + ' cores';
+      }
+
+      if (data.cpuInfo) {
+        document.getElementById('cpu-model').textContent = data.cpuInfo.model;
+      }
+
+      // --- Memory ---
+      if (data.memory) {
+        const ram = data.memory.ram;
+        document.getElementById('mem-value').textContent = ram.usagePercent.toFixed(1) + '%';
+        updateGauge('mem-gauge', ram.usagePercent);
+        document.getElementById('mem-detail').textContent =
+          formatBytes(ram.usedBytes) + ' / ' + formatBytes(ram.totalBytes);
+      }
+
+      // --- Disk ---
+      if (data.disk && data.disk.length > 0) {
+        // Show the main disk (usually the first real filesystem)
+        const disk = data.disk[0];
+        document.getElementById('disk-value').textContent = disk.usagePercent.toFixed(1) + '%';
+        updateGauge('disk-gauge', disk.usagePercent);
+        document.getElementById('disk-detail').textContent =
+          formatBytes(disk.usedBytes) + ' / ' + formatBytes(disk.totalBytes);
+      }
+
+      // --- Load Average ---
+      if (data.loadAverage) {
+        const la = data.loadAverage;
+        document.getElementById('load-1').textContent = la.load1.toFixed(2);
+        document.getElementById('load-5').textContent = la.load5.toFixed(2);
+        document.getElementById('load-15').textContent = la.load15.toFixed(2);
+        document.getElementById('load-procs').textContent =
+          la.runningProcesses + ' / ' + la.totalProcesses;
+      }
+
+      // --- Uptime ---
+      if (data.uptime) {
+        document.getElementById('uptime').textContent =
+          'Uptime: ' + data.uptime.formatted;
+      }
+
+      // --- Nginx ---
+      if (data.nginx && !data.nginx.error) {
+        document.getElementById('nginx-active').textContent = data.nginx.activeConnections;
+        document.getElementById('nginx-rps').textContent =
+          data.nginx.rates ? data.nginx.rates.requestsPerSecond.toFixed(1) : '--';
+        document.getElementById('nginx-total').textContent =
+          data.nginx.requests.toLocaleString();
+        document.getElementById('nginx-waiting').textContent = data.nginx.waiting;
+      } else if (data.nginx && data.nginx.error) {
+        document.getElementById('nginx-active').textContent = 'Error';
+      }
+
+      // --- Docker Containers ---
+      if (Array.isArray(data.containers)) {
+        const containerEl = document.getElementById('containers');
+        containerEl.innerHTML = data.containers.map(function(c) {
+          const stateClass = c.state === 'running' ? 'status-running'
+            : c.state === 'exited' ? 'status-exited'
+            : 'status-other';
+
+          let statsHtml = '';
+          if (c.stats && !c.stats.error) {
+            statsHtml =
+              '<div>' +
+                '<div class="container-stat-label">CPU</div>' +
+                '<div class="container-stat-value">' + c.stats.cpuPercent.toFixed(1) + '%</div>' +
+              '</div>' +
+              '<div>' +
+                '<div class="container-stat-label">Memory</div>' +
+                '<div class="container-stat-value">' + formatBytes(c.stats.memory.usageBytes) + '</div>' +
+              '</div>' +
+              '<div>' +
+                '<div class="container-stat-label">Uptime</div>' +
+                '<div class="container-stat-value">' + formatContainerUptime(c.uptimeSeconds) + '</div>' +
+              '</div>' +
+              '<div>' +
+                '<div class="container-stat-label">Restarts</div>' +
+                '<div class="container-stat-value">' + c.restartCount + '</div>' +
+              '</div>';
+          } else {
+            statsHtml =
+              '<div>' +
+                '<div class="container-stat-label">Restarts</div>' +
+                '<div class="container-stat-value">' + c.restartCount + '</div>' +
+              '</div>' +
+              '<div>' +
+                '<div class="container-stat-label">Status</div>' +
+                '<div class="container-stat-value">' + c.state + '</div>' +
+              '</div>';
+          }
+
+          return (
+            '<div class="container-card">' +
+              '<div class="container-header">' +
+                '<span class="container-name">' + c.name + '</span>' +
+                '<span class="status-badge ' + stateClass + '">' + c.state + '</span>' +
+              '</div>' +
+              '<div class="container-stats">' + statsHtml + '</div>' +
+            '</div>'
+          );
+        }).join('');
+      }
+
+      // --- Timestamp ---
+      document.getElementById('last-updated').textContent =
+        'Updated: ' + new Date(data.timestamp).toLocaleTimeString();
+
+      // --- Chart ---
+      addChartPoint(data);
+    }
+
+    // ===================================================================
+    // WebSocket connection
+    // ===================================================================
+    // Connects to the /ws endpoint. On connect, the server sends the
+    // full history (type: "history"), then pushes live snapshots every
+    // collection cycle. If the connection drops, we reconnect after
+    // a short delay.
+    // ===================================================================
+
+    let ws;
+    let reconnectTimer;
+
+    function connect() {
+      // Build WebSocket URL from the current page location
+      // If page is at https://admin.zacharystocks.com, ws becomes
+      // wss://admin.zacharystocks.com/ws
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const url = protocol + '//' + location.host + '/ws';
+
+      ws = new WebSocket(url);
+
+      ws.onopen = function() {
+        document.getElementById('ws-dot').className = 'connection-dot connected';
+        document.getElementById('ws-status').textContent = 'Connected';
+        console.log('WebSocket connected');
+      };
+
+      ws.onmessage = function(event) {
+        var msg = JSON.parse(event.data);
+
+        // Initial history message — backfill the chart
+        if (msg.type === 'history') {
+          console.log('Received history: ' + msg.data.length + ' snapshots');
+          msg.data.forEach(function(snapshot) {
+            addChartPoint(snapshot);
+          });
+          // Update the dashboard with the most recent snapshot
+          if (msg.data.length > 0) {
+            updateDashboard(msg.data[msg.data.length - 1]);
+          }
+          return;
+        }
+
+        // Regular snapshot — update everything
+        updateDashboard(msg);
+      };
+
+      ws.onclose = function() {
+        document.getElementById('ws-dot').className = 'connection-dot disconnected';
+        document.getElementById('ws-status').textContent = 'Reconnecting...';
+        console.log('WebSocket disconnected, reconnecting in 3s...');
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+
+      ws.onerror = function(err) {
+        console.error('WebSocket error:', err);
+        ws.close();
+      };
+    }
+
+    // Start the connection
+    connect();
+  </script>
+
+</body>
+</html>
