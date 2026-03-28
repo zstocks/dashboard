@@ -26,7 +26,7 @@ const crypto = require('crypto');
 // DASHBOARD_PASSWORD: the password to access the dashboard (required)
 // SESSION_SECRET: secret key for signing session tokens (required)
 //
-// Both are set in docker-compose.yml as environment variables.
+// Both are set in .env.
 // The server will refuse to start if either is missing.
 // ---------------------------------------------------------------------------
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;

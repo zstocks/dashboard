@@ -1,8 +1,4 @@
-// server.js — Dashboard API server with auth, WebSocket, and static files
-//
-// All routes except /health and /login require authentication.
-// On first visit, unauthenticated users are redirected to /login.
-// After entering the correct password, a signed session cookie is set.
+// server.js — Dashboard API server with auth, WebSocket, alerts, and static files
 //
 // Routes:
 //   GET  /login          — login page (public)
@@ -15,6 +11,7 @@
 //   GET  /api/nginx      — latest Nginx metrics (requires auth)
 //   GET  /api/metrics    — latest full snapshot (requires auth)
 //   GET  /api/history    — full ring buffer (requires auth)
+//   GET  /api/alerts     — currently active alerts (requires auth)
 //   WS   /ws             — WebSocket stream (requires auth via cookie)
 
 const http = require('http');
@@ -23,6 +20,7 @@ const path = require('path');
 const { WebSocketServer } = require('ws');
 const collector = require('./collector');
 const auth = require('./auth');
+const { getActiveAlerts } = require('./alerts');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -107,7 +105,6 @@ const publicRoutes = {
   },
 
   'GET /login': async (req, res) => {
-    // If already authenticated, redirect to dashboard
     if (auth.isAuthenticated(req)) {
       return redirect(res, '/');
     }
@@ -194,6 +191,12 @@ const protectedRoutes = {
       snapshots: collector.getHistory(),
     });
   },
+
+  'GET /api/alerts': async (req, res) => {
+    sendJson(res, {
+      alerts: getActiveAlerts(),
+    });
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -217,11 +220,9 @@ const server = http.createServer(async (req, res) => {
 
   // Everything else requires authentication
   if (!auth.isAuthenticated(req)) {
-    // API requests get a 401 JSON response
     if (urlPath.startsWith('/api/')) {
       return sendError(res, 'Unauthorized', 401);
     }
-    // Browser requests get redirected to login
     return redirect(res, '/login');
   }
 
@@ -252,14 +253,9 @@ const server = http.createServer(async (req, res) => {
 // ---------------------------------------------------------------------------
 // WebSocket server
 // ---------------------------------------------------------------------------
-// WebSocket connections also require auth. The browser sends cookies
-// during the WebSocket upgrade handshake, so we can check the session
-// cookie before accepting the connection.
-// ---------------------------------------------------------------------------
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 wss.on('connection', (ws, req) => {
-  // Verify auth from the upgrade request's cookies
   if (!auth.isAuthenticated(req)) {
     ws.close(1008, 'Unauthorized');
     return;
