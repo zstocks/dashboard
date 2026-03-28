@@ -1,33 +1,37 @@
-// server.js — Dashboard API server with WebSocket and static file serving
+// server.js — Dashboard API server with auth, WebSocket, and static files
 //
-// HTTP endpoints serve JSON from the ring buffer (collected on interval).
-// WebSocket clients receive live pushes every collection cycle.
-// Static files (the dashboard UI) are served from the public/ directory.
+// All routes except /health and /login require authentication.
+// On first visit, unauthenticated users are redirected to /login.
+// After entering the correct password, a signed session cookie is set.
 //
 // Routes:
-//   GET /               — serves public/index.html (the dashboard UI)
-//   GET /health         — health check
-//   GET /api/system     — latest system metrics
-//   GET /api/containers — latest Docker container stats
-//   GET /api/nginx      — latest Nginx metrics
-//   GET /api/metrics    — latest full snapshot
-//   GET /api/history    — full ring buffer (for chart backfill)
-//   WS  /ws             — WebSocket stream (live updates)
+//   GET  /login          — login page (public)
+//   POST /login          — authenticate and set session cookie (public)
+//   GET  /logout         — clear session cookie and redirect to login
+//   GET  /health         — health check (public, for monitoring)
+//   GET  /               — dashboard UI (requires auth)
+//   GET  /api/system     — latest system metrics (requires auth)
+//   GET  /api/containers — latest Docker container stats (requires auth)
+//   GET  /api/nginx      — latest Nginx metrics (requires auth)
+//   GET  /api/metrics    — latest full snapshot (requires auth)
+//   GET  /api/history    — full ring buffer (requires auth)
+//   WS   /ws             — WebSocket stream (requires auth via cookie)
 
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 const collector = require('./collector');
+const auth = require('./auth');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
+// Validate auth config before anything else
+auth.validateConfig();
+
 // ---------------------------------------------------------------------------
 // Static file serving
-// ---------------------------------------------------------------------------
-// Maps file extensions to MIME types. When a request comes in that
-// isn't an API route, we check if it matches a file in public/.
 // ---------------------------------------------------------------------------
 const MIME_TYPES = {
   '.html': 'text/html',
@@ -71,14 +75,73 @@ function sendError(res, message, statusCode = 500) {
   sendJson(res, { error: message }, statusCode);
 }
 
+function redirect(res, location) {
+  res.writeHead(302, { 'Location': location });
+  res.end();
+}
+
 // ---------------------------------------------------------------------------
-// Route handlers
+// Parse JSON request body
 // ---------------------------------------------------------------------------
-const routes = {
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch (err) {
+        reject(new Error('Invalid JSON'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Public routes (no auth required)
+// ---------------------------------------------------------------------------
+const publicRoutes = {
   'GET /health': async (req, res) => {
     sendJson(res, { status: 'ok', app: 'dashboard' });
   },
 
+  'GET /login': async (req, res) => {
+    // If already authenticated, redirect to dashboard
+    if (auth.isAuthenticated(req)) {
+      return redirect(res, '/');
+    }
+    serveStaticFile(res, path.join(PUBLIC_DIR, 'login.html'));
+  },
+
+  'POST /login': async (req, res) => {
+    const body = await parseBody(req);
+
+    if (auth.checkPassword(body.password)) {
+      const token = auth.createToken();
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'Set-Cookie': auth.buildCookieHeader(token),
+      });
+      res.end(JSON.stringify({ success: true }));
+    } else {
+      sendError(res, 'Invalid password', 401);
+    }
+  },
+
+  'GET /logout': async (req, res) => {
+    res.writeHead(302, {
+      'Location': '/login',
+      'Set-Cookie': auth.buildClearCookieHeader(),
+    });
+    res.end();
+  },
+};
+
+// ---------------------------------------------------------------------------
+// Protected routes (auth required)
+// ---------------------------------------------------------------------------
+const protectedRoutes = {
   'GET /api/system': async (req, res) => {
     const latest = collector.getLatest();
     if (!latest) {
@@ -140,11 +203,11 @@ const server = http.createServer(async (req, res) => {
   const urlPath = req.url.split('?')[0].replace(/\/+$/, '') || '/';
   const key = `${req.method} ${urlPath}`;
 
-  // Check API routes first
-  const handler = routes[key];
-  if (handler) {
+  // Check public routes first (no auth needed)
+  const publicHandler = publicRoutes[key];
+  if (publicHandler) {
     try {
-      await handler(req, res);
+      await publicHandler(req, res);
     } catch (err) {
       console.error(`Error handling ${key}:`, err);
       sendError(res, 'Internal server error');
@@ -152,13 +215,32 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Fall through to static file serving
-  // Map "/" to "/index.html"
+  // Everything else requires authentication
+  if (!auth.isAuthenticated(req)) {
+    // API requests get a 401 JSON response
+    if (urlPath.startsWith('/api/')) {
+      return sendError(res, 'Unauthorized', 401);
+    }
+    // Browser requests get redirected to login
+    return redirect(res, '/login');
+  }
+
+  // Check protected API routes
+  const protectedHandler = protectedRoutes[key];
+  if (protectedHandler) {
+    try {
+      await protectedHandler(req, res);
+    } catch (err) {
+      console.error(`Error handling ${key}:`, err);
+      sendError(res, 'Internal server error');
+    }
+    return;
+  }
+
+  // Fall through to static file serving (also requires auth)
   const fileName = urlPath === '/' ? '/index.html' : urlPath;
   const filePath = path.join(PUBLIC_DIR, fileName);
 
-  // Security: make sure the resolved path is still within PUBLIC_DIR
-  // This prevents directory traversal attacks like "/../../../etc/passwd"
   const resolved = path.resolve(filePath);
   if (!resolved.startsWith(PUBLIC_DIR)) {
     return sendError(res, 'Forbidden', 403);
@@ -170,9 +252,19 @@ const server = http.createServer(async (req, res) => {
 // ---------------------------------------------------------------------------
 // WebSocket server
 // ---------------------------------------------------------------------------
+// WebSocket connections also require auth. The browser sends cookies
+// during the WebSocket upgrade handshake, so we can check the session
+// cookie before accepting the connection.
+// ---------------------------------------------------------------------------
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  // Verify auth from the upgrade request's cookies
+  if (!auth.isAuthenticated(req)) {
+    ws.close(1008, 'Unauthorized');
+    return;
+  }
+
   console.log(`WebSocket client connected (total: ${wss.clients.size})`);
   collector.addClient(ws);
 
