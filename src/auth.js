@@ -19,18 +19,34 @@
 // But it IS tamper-proof: you can't forge a valid token without the secret.
 
 const crypto = require('crypto');
+const net = require('net');
 
 // ---------------------------------------------------------------------------
 // Configuration from environment variables
 // ---------------------------------------------------------------------------
-// DASHBOARD_PASSWORD: the password to access the dashboard (required)
-// SESSION_SECRET: secret key for signing session tokens (required)
+// AUTH_MODE: how requests are authenticated (optional, default "password")
+//   "password" — cookie session issued after a correct password (original)
+//   "tailnet"  — trust any request that arrived over the Tailscale interface
+// DASHBOARD_PASSWORD: the password to access the dashboard (password mode)
+// SESSION_SECRET: secret key for signing session tokens (password mode)
 //
-// Both are set in .env.
-// The server will refuse to start if either is missing.
+// All are set in .env. The server refuses to start on an invalid mode, or on
+// a missing password/secret in password mode.
 // ---------------------------------------------------------------------------
 const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD;
 const SESSION_SECRET = process.env.SESSION_SECRET;
+const AUTH_MODE = process.env.AUTH_MODE || 'password';
+
+// ---------------------------------------------------------------------------
+// Tailnet address ranges
+// ---------------------------------------------------------------------------
+// Tailscale assigns every node an IPv4 from the CGNAT block and an IPv6 from
+// its own ULA /48. These must match the allow list in Nginx's
+// snippets/tailnet-only.conf — Nginx is gate one, this is gate two.
+// ---------------------------------------------------------------------------
+const TAILNET = new net.BlockList();
+TAILNET.addSubnet('100.64.0.0', 10, 'ipv4');
+TAILNET.addSubnet('fd7a:115c:a1e0::', 48, 'ipv6');
 
 // Cookie expires after 7 days (in milliseconds)
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
@@ -42,6 +58,16 @@ const COOKIE_NAME = 'dashboard_session';
 // Validate that required env vars are set
 // ---------------------------------------------------------------------------
 function validateConfig() {
+  if (AUTH_MODE !== 'password' && AUTH_MODE !== 'tailnet') {
+    console.error(`ERROR: AUTH_MODE must be "password" or "tailnet" (got "${AUTH_MODE}")`);
+    process.exit(1);
+  }
+
+  if (AUTH_MODE === 'tailnet') {
+    console.log('Auth mode: tailnet — password login disabled, trusting X-Real-IP within Tailscale ranges');
+    return;
+  }
+
   if (!DASHBOARD_PASSWORD) {
     console.error('ERROR: DASHBOARD_PASSWORD environment variable is required');
     process.exit(1);
@@ -140,7 +166,7 @@ function parseCookies(req) {
   const header = req.headers.cookie;
   if (!header) return cookies;
 
-  header.split(';').forEach(function(pair) {
+  header.split(';').forEach(function (pair) {
     const [name, ...rest] = pair.trim().split('=');
     if (name && rest.length > 0) {
       cookies[name.trim()] = rest.join('=').trim();
@@ -180,15 +206,44 @@ function buildClearCookieHeader() {
 }
 
 // ---------------------------------------------------------------------------
+// Tailnet check
+// ---------------------------------------------------------------------------
+// Nginx sets X-Real-IP to $remote_addr on every proxied request, overwriting
+// anything the client sent. We deliberately ignore X-Forwarded-For: Nginx
+// *appends* to that one, so a client can plant a fake first entry.
+//
+// Trust boundary: the container is bound to 127.0.0.1 on the host, so only
+// Nginx can reach it to set this header. Fail closed — a missing or
+// unparseable header is treated as not-from-tailnet.
+// ---------------------------------------------------------------------------
+function getClientIp(req) {
+  const raw = req.headers['x-real-ip'];
+  if (!raw) return null;
+  const ip = String(raw).trim();
+  return net.isIP(ip) ? ip : null;
+}
+
+function isFromTailnet(req) {
+  const ip = getClientIp(req);
+  if (!ip) return false;
+  const family = net.isIP(ip) === 6 ? 'ipv6' : 'ipv4';
+  return TAILNET.check(ip, family);
+}
+
+// ---------------------------------------------------------------------------
 // Check if a request is authenticated
 // ---------------------------------------------------------------------------
 function isAuthenticated(req) {
+  if (AUTH_MODE === 'tailnet') {
+    return isFromTailnet(req);
+  }
   const cookies = parseCookies(req);
   const token = cookies[COOKIE_NAME];
   return verifyToken(token);
 }
 
 module.exports = {
+  AUTH_MODE,
   validateConfig,
   createToken,
   verifyToken,
@@ -197,5 +252,6 @@ module.exports = {
   buildCookieHeader,
   buildClearCookieHeader,
   isAuthenticated,
+  isFromTailnet,
   COOKIE_NAME,
 };

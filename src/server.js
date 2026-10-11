@@ -105,13 +105,16 @@ const publicRoutes = {
   },
 
   'GET /login': async (req, res) => {
-    if (auth.isAuthenticated(req)) {
+    if (auth.AUTH_MODE === 'tailnet' || auth.isAuthenticated(req)) {
       return redirect(res, '/');
     }
     serveStaticFile(res, path.join(PUBLIC_DIR, 'login.html'));
   },
 
   'POST /login': async (req, res) => {
+    if (auth.AUTH_MODE === 'tailnet') {
+      return sendError(res, 'Not found', 404);
+    }
     const body = await parseBody(req);
 
     if (auth.checkPassword(body.password)) {
@@ -127,6 +130,9 @@ const publicRoutes = {
   },
 
   'GET /logout': async (req, res) => {
+    if (auth.AUTH_MODE === 'tailnet') {
+      return redirect(res, '/');
+    }
     res.writeHead(302, {
       'Location': '/login',
       'Set-Cookie': auth.buildClearCookieHeader(),
